@@ -199,6 +199,44 @@ object ImageUtil {
     }
 
     /**
+     * Get the dimensions of an image without fully decoding it.
+     *
+     * @return Pair of (width, height), or null if dimensions could not be determined.
+     */
+    fun getImageDimensions(imageSource: BufferedSource): Pair<Int, Int>? {
+        val options = extractImageOptions(imageSource)
+        if (options.outWidth <= 0 || options.outHeight <= 0) return null
+        return options.outWidth to options.outHeight
+    }
+
+    /**
+     * Merge two images vertically (top image above, bottom image below).
+     * Used to stitch split manga pages back together.
+     */
+    fun mergeVertically(topSource: BufferedSource, bottomSource: BufferedSource): BufferedSource {
+        val topBitmap = BitmapFactory.decodeStream(topSource.inputStream())
+        val bottomBitmap = BitmapFactory.decodeStream(bottomSource.inputStream())
+
+        val width = max(topBitmap.width, bottomBitmap.width)
+        val height = topBitmap.height + bottomBitmap.height
+
+        val result = createBitmap(width, height)
+        result.applyCanvas {
+            drawBitmap(topBitmap, 0f, 0f, null)
+            drawBitmap(bottomBitmap, 0f, topBitmap.height.toFloat(), null)
+        }
+
+        topBitmap.recycle()
+        bottomBitmap.recycle()
+
+        val output = Buffer()
+        result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        result.recycle()
+
+        return output
+    }
+
+    /**
      * Check whether the image is considered a tall image.
      *
      * @return true if the height:width ratio is greater than 3.
