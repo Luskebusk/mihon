@@ -87,6 +87,8 @@ class ReaderPreferences(
 
     val webtoonDisableZoomOut: Preference<Boolean> = preferenceStore.getBoolean("webtoon_disable_zoom_out", false)
 
+    fun mergeSplitPages() = preferenceStore.getBoolean("pref_merge_split_pages", false)
+
     // endregion
 
     // region Split two-page spread

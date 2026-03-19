@@ -185,6 +185,14 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
         notifyDataSetChanged()
     }
 
+    fun onStripMerged(stripPage: ReaderPage) {
+        val index = items.indexOf(stripPage)
+        if (index != -1) {
+            items.removeAt(index)
+            notifyDataSetChanged()
+        }
+    }
+
     fun refresh() {
         readerThemedContext = viewer.activity.createReaderThemeContext()
     }

@@ -186,6 +186,12 @@ class PagerPageHolder(
     }
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {
+        // Try merging split pages before other processing
+        if (viewer.config.mergeSplitPages && page !is InsertPage) {
+            val merged = mergeSplitPageIfNeeded(page, imageSource)
+            if (merged != null) return merged
+        }
+
         if (viewer.config.dualPageRotateToFit) {
             return rotateDualPage(imageSource)
         }
@@ -206,6 +212,48 @@ class PagerPageHolder(
         onPageSplit(page)
 
         return splitInHalf(imageSource)
+    }
+
+    /**
+     * Checks if this portrait page should be merged with the next page (a landscape strip).
+     * Returns the merged image source if merge conditions are met, null otherwise.
+     */
+    private fun mergeSplitPageIfNeeded(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
+        // Get current image dimensions
+        val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
+
+        // Current page must be portrait (width/height < 1.0)
+        if (width.toFloat() / height >= 1.0f) return null
+
+        // Get the next sequential page in the chapter
+        val pages = page.chapter.pages ?: return null
+        val pageIndexInList = pages.indexOf(page)
+        if (pageIndexInList < 0) return null
+        val nextPage = pages.getOrNull(pageIndexInList + 1) ?: return null
+
+        // Next page must have its image stream available
+        val nextStream = nextPage.stream ?: return null
+
+        // Read next page image into a buffer
+        val nextSource = nextStream().use { Buffer().readFrom(it) }
+
+        // Get next image dimensions
+        val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
+
+        // Next page must be a wide strip (aspect ratio > 1.5)
+        if (nextWidth.toFloat() / nextHeight <= 1.5f) return null
+
+        // Widths must be approximately equal (within 10%)
+        val widthRatio = width.toFloat() / nextWidth
+        if (widthRatio < 0.9f || widthRatio > 1.1f) return null
+
+        // Merge: stitch current page (top) + strip page (bottom)
+        val merged = ImageUtil.mergeVertically(imageSource, nextSource)
+
+        // Remove the strip page from the adapter so it is not shown separately
+        viewer.onStripMerged(nextPage)
+
+        return merged
     }
 
     private fun rotateDualPage(imageSource: BufferedSource): BufferedSource {
