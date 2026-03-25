@@ -210,6 +210,57 @@ object ImageUtil {
     }
 
     /**
+     * Get the bounding rectangle of non-black content in the image, ignoring black padding.
+     * Used to determine the effective content dimensions when pages have large black borders.
+     *
+     * @param imageSource The image source to analyze (not consumed — uses peek()).
+     * @param threshold Pixels with all RGB components below this value are considered black.
+     * @return Rect representing the content bounding box in original image coordinates,
+     *         or null if the image cannot be decoded.
+     */
+    fun getContentBounds(imageSource: BufferedSource, threshold: Int = 40): Rect? {
+        val sampleSize = 4
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val bitmap = BitmapFactory.decodeStream(imageSource.peek().inputStream(), null, options) ?: return null
+        val width = bitmap.width
+        val height = bitmap.height
+
+        var top = 0
+        var bottom = height - 1
+        val rowPixels = IntArray(width)
+
+        // Scan from top to find first non-black row; read entire rows with getPixels() for efficiency,
+        // then sample every 4th pixel within the row.
+        outer@ for (y in 0 until height) {
+            bitmap.getPixels(rowPixels, 0, width, 0, y, width, 1)
+            for (x in rowPixels.indices step 4) {
+                val pixel = rowPixels[x]
+                if (Color.red(pixel) > threshold || Color.green(pixel) > threshold || Color.blue(pixel) > threshold) {
+                    top = y
+                    break@outer
+                }
+            }
+        }
+
+        // Scan from bottom to find last non-black row.
+        outer@ for (y in height - 1 downTo top) {
+            bitmap.getPixels(rowPixels, 0, width, 0, y, width, 1)
+            for (x in rowPixels.indices step 4) {
+                val pixel = rowPixels[x]
+                if (Color.red(pixel) > threshold || Color.green(pixel) > threshold || Color.blue(pixel) > threshold) {
+                    bottom = y
+                    break@outer
+                }
+            }
+        }
+
+        bitmap.recycle()
+        // Scale coordinates back to original image space and use bottom + 1 so that
+        // Rect.height() = (bottom - top + 1) rows (inclusive range).
+        return Rect(0, top * sampleSize, width * sampleSize, (bottom + 1) * sampleSize)
+    }
+
+    /**
      * Merge two images vertically (top image above, bottom image below).
      * Used to stitch split manga pages back together.
      */
