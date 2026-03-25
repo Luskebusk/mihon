@@ -11,4 +11,7 @@ open class ReaderPage(
 ) : Page(index, url, imageUrl, null) {
 
     open lateinit var chapter: ReaderChapter
+
+    /** The next page to merge with when "Merge split pages" is enabled. Set during chapter loading. */
+    var mergePartner: ReaderPage? = null
 }

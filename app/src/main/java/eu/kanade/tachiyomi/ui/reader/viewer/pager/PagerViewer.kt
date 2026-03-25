@@ -449,12 +449,6 @@ abstract class PagerViewer(val activity: ReaderActivity) : Viewer {
         }
     }
 
-    fun onStripMerged(stripPage: ReaderPage) {
-        activity.runOnUiThread {
-            adapter.onStripMerged(stripPage)
-        }
-    }
-
     private fun cleanupPageSplit() {
         adapter.cleanupPageSplit()
     }
