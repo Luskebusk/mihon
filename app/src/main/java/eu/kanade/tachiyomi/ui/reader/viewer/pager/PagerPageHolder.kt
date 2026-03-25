@@ -240,8 +240,15 @@ class PagerPageHolder(
         // Get next image dimensions
         val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
 
-        // Next page must be a wide strip (aspect ratio > 1.5)
-        if (nextWidth.toFloat() / nextHeight <= 1.5f) return null
+        // Next page must be a wide strip (aspect ratio > 1.5).
+        // If the raw dimensions don't pass, fall back to checking the effective content area
+        // (ignoring large black borders at the top/bottom) before giving up.
+        val isWideByRawDimensions = nextWidth.toFloat() / nextHeight > 1.5f
+        if (!isWideByRawDimensions) {
+            val contentBounds = ImageUtil.getContentBounds(nextSource)
+            val effectiveHeight = contentBounds?.height() ?: 0
+            if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= 1.5f) return null
+        }
 
         // Widths must be approximately equal (within 10%)
         val widthRatio = width.toFloat() / nextWidth
