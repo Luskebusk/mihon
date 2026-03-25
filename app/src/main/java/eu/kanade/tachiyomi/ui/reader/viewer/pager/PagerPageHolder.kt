@@ -217,24 +217,26 @@ class PagerPageHolder(
     /**
      * Checks if this page should be merged with the next page.
      * Handles two cases:
-     *   PATH 1: Current page is portrait + next page is a wide strip → merge vertically.
-     *   PATH 2: Current page is a wide strip + next page is also a wide strip → merge vertically.
+     *   PATH 1: Current page is portrait (ratio < 1.0) + next page is a wide strip (ratio > 1.5) → merge vertically.
+     *   PATH 2: Current page is landscape (ratio > 1.0) + next page is also landscape (ratio > 1.0) → merge vertically.
      * Returns the merged image source if merge conditions are met, null otherwise.
      */
     private fun mergeSplitPageIfNeeded(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
         val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
         val aspectRatio = width.toFloat() / height
 
-        // PATH 1: Current page is portrait (aspect ratio < 1.0) — next page must be a wide strip.
-        // PATH 2: Current page is a wide strip (aspect ratio > 1.5) — next page must also be a
-        //         wide strip (two consecutive strips forming a split double-page spread).
-        if (aspectRatio >= 1.0f && aspectRatio <= 1.5f) return null
-
-        return mergeWithNextPageIfWideStrip(page, imageSource, width)
+        return when {
+            // PATH 1: Current page is portrait — next page must be a wide strip (ratio > 1.5).
+            aspectRatio < 1.0f -> mergeWithNextPageIfWideStrip(page, imageSource, width, 1.5f)
+            // PATH 2: Current page is landscape — next page must also be landscape (ratio > 1.0).
+            aspectRatio > 1.0f -> mergeWithNextPageIfWideStrip(page, imageSource, width, 1.0f)
+            // Exactly square — skip.
+            else -> null
+        }
     }
 
     /**
-     * Fetches the next page, verifies it is a wide strip (aspect ratio > 1.5, with a
+     * Fetches the next page, verifies it meets the minimum aspect ratio threshold (with a
      * content-bounds fallback for padded pages), checks that widths are within 10% of each
      * other, and merges the two pages vertically.
      */
@@ -242,6 +244,7 @@ class PagerPageHolder(
         page: ReaderPage,
         imageSource: BufferedSource,
         currentWidth: Int,
+        minNextAspectRatio: Float = 1.5f,
     ): BufferedSource? {
         val pages = page.chapter.pages ?: return null
         val pageIndexInList = pages.indexOf(page)
@@ -253,13 +256,13 @@ class PagerPageHolder(
 
         val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
 
-        // Next page must be a wide strip (aspect ratio > 1.5).
+        // Next page must meet the minimum aspect ratio threshold.
         // Fall back to content-bounds check to handle pages with large black padding.
-        val nextIsWideStrip = nextWidth.toFloat() / nextHeight > 1.5f
-        if (!nextIsWideStrip) {
+        val nextIsWide = nextWidth.toFloat() / nextHeight > minNextAspectRatio
+        if (!nextIsWide) {
             val contentBounds = ImageUtil.getContentBounds(nextSource)
             val effectiveHeight = contentBounds?.height() ?: 0
-            if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= 1.5f) return null
+            if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= minNextAspectRatio) return null
         }
 
         // Widths must be approximately equal (within 10%)
