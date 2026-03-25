@@ -215,51 +215,59 @@ class PagerPageHolder(
     }
 
     /**
-     * Checks if this portrait page should be merged with the next page (a landscape strip).
+     * Checks if this page should be merged with the next page.
+     * Handles two cases:
+     *   PATH 1: Current page is portrait + next page is a wide strip → merge vertically.
+     *   PATH 2: Current page is a wide strip + next page is also a wide strip → merge vertically.
      * Returns the merged image source if merge conditions are met, null otherwise.
      */
     private fun mergeSplitPageIfNeeded(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
-        // Get current image dimensions
         val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
+        val aspectRatio = width.toFloat() / height
 
-        // Current page must be portrait (width/height < 1.0)
-        if (width.toFloat() / height >= 1.0f) return null
+        // PATH 1: Current page is portrait (aspect ratio < 1.0) — next page must be a wide strip.
+        // PATH 2: Current page is a wide strip (aspect ratio > 1.5) — next page must also be a
+        //         wide strip (two consecutive strips forming a split double-page spread).
+        if (aspectRatio >= 1.0f && aspectRatio <= 1.5f) return null
 
-        // Get the next sequential page in the chapter
+        return mergeWithNextPageIfWideStrip(page, imageSource, width)
+    }
+
+    /**
+     * Fetches the next page, verifies it is a wide strip (aspect ratio > 1.5, with a
+     * content-bounds fallback for padded pages), checks that widths are within 10% of each
+     * other, and merges the two pages vertically.
+     */
+    private fun mergeWithNextPageIfWideStrip(
+        page: ReaderPage,
+        imageSource: BufferedSource,
+        currentWidth: Int,
+    ): BufferedSource? {
         val pages = page.chapter.pages ?: return null
         val pageIndexInList = pages.indexOf(page)
         if (pageIndexInList < 0) return null
         val nextPage = pages.getOrNull(pageIndexInList + 1) ?: return null
 
-        // Next page must have its image stream available
         val nextStream = nextPage.stream ?: return null
-
-        // Read next page image into a buffer
         val nextSource = nextStream().use { Buffer().readFrom(it) }
 
-        // Get next image dimensions
         val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
 
         // Next page must be a wide strip (aspect ratio > 1.5).
-        // If the raw dimensions don't pass, fall back to checking the effective content area
-        // (ignoring large black borders at the top/bottom) before giving up.
-        val isWideByRawDimensions = nextWidth.toFloat() / nextHeight > 1.5f
-        if (!isWideByRawDimensions) {
+        // Fall back to content-bounds check to handle pages with large black padding.
+        val nextIsWideStrip = nextWidth.toFloat() / nextHeight > 1.5f
+        if (!nextIsWideStrip) {
             val contentBounds = ImageUtil.getContentBounds(nextSource)
             val effectiveHeight = contentBounds?.height() ?: 0
             if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= 1.5f) return null
         }
 
         // Widths must be approximately equal (within 10%)
-        val widthRatio = width.toFloat() / nextWidth
+        val widthRatio = currentWidth.toFloat() / nextWidth
         if (widthRatio < 0.9f || widthRatio > 1.1f) return null
 
-        // Merge: stitch current page (top) + strip page (bottom)
         val merged = ImageUtil.mergeVertically(imageSource, nextSource)
-
-        // Remove the strip page from the adapter so it is not shown separately
         viewer.onStripMerged(nextPage)
-
         return merged
     }
 
