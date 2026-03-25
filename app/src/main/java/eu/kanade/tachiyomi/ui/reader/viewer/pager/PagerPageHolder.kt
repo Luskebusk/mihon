@@ -186,9 +186,9 @@ class PagerPageHolder(
     }
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {
-        // Try merging split pages before other processing
+        // Merge with pre-identified partner page (set during chapter loading in PagerViewerAdapter).
         if (viewer.config.mergeSplitPages && page !is InsertPage) {
-            val merged = mergeSplitPageIfNeeded(page, imageSource)
+            val merged = mergeWithPartner(page, imageSource)
             if (merged != null) return merged
         }
 
@@ -215,63 +215,21 @@ class PagerPageHolder(
     }
 
     /**
-     * Checks if this page should be merged with the next page.
-     * Handles two cases:
-     *   PATH 1: Current page is portrait (ratio < 1.0) + next page is a wide strip (ratio > 1.5) → merge vertically.
-     *   PATH 2: Current page is landscape (ratio > 1.0) + next page is also landscape (ratio > 1.0) → merge vertically.
-     * Returns the merged image source if merge conditions are met, null otherwise.
+     * Merges this page with its pre-identified [ReaderPage.mergePartner], reading the partner's
+     * stream and stitching both images vertically.  Returns null if no partner is set or the merge
+     * fails for any reason (the caller will then fall through to normal rendering).
      */
-    private fun mergeSplitPageIfNeeded(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
-        val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
-        val aspectRatio = width.toFloat() / height
+    private fun mergeWithPartner(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
+        val partner = page.mergePartner ?: return null
+        val partnerStream = partner.stream ?: return null
 
-        return when {
-            // PATH 1: Current page is portrait — next page must be a wide strip (ratio > 1.5).
-            aspectRatio < 1.0f -> mergeWithNextPageIfWideStrip(page, imageSource, width, 1.5f)
-            // PATH 2: Current page is landscape — next page must also be landscape (ratio > 1.0).
-            aspectRatio > 1.0f -> mergeWithNextPageIfWideStrip(page, imageSource, width, 1.0f)
-            // Exactly square — skip.
-            else -> null
+        return try {
+            val partnerSource = partnerStream().use { Buffer().readFrom(it) }
+            ImageUtil.mergeVertically(imageSource, partnerSource)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Failed to merge with partner page" }
+            null
         }
-    }
-
-    /**
-     * Fetches the next page, verifies it meets the minimum aspect ratio threshold (with a
-     * content-bounds fallback for padded pages), checks that widths are within 10% of each
-     * other, and merges the two pages vertically.
-     */
-    private fun mergeWithNextPageIfWideStrip(
-        page: ReaderPage,
-        imageSource: BufferedSource,
-        currentWidth: Int,
-        minNextAspectRatio: Float = 1.5f,
-    ): BufferedSource? {
-        val pages = page.chapter.pages ?: return null
-        val pageIndexInList = pages.indexOf(page)
-        if (pageIndexInList < 0) return null
-        val nextPage = pages.getOrNull(pageIndexInList + 1) ?: return null
-
-        val nextStream = nextPage.stream ?: return null
-        val nextSource = nextStream().use { Buffer().readFrom(it) }
-
-        val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
-
-        // Next page must meet the minimum aspect ratio threshold.
-        // Fall back to content-bounds check to handle pages with large black padding.
-        val nextIsWide = nextWidth.toFloat() / nextHeight > minNextAspectRatio
-        if (!nextIsWide) {
-            val contentBounds = ImageUtil.getContentBounds(nextSource)
-            val effectiveHeight = contentBounds?.height() ?: 0
-            if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= minNextAspectRatio) return null
-        }
-
-        // Widths must be approximately equal (within 10%)
-        val widthRatio = currentWidth.toFloat() / nextWidth
-        if (widthRatio < 0.9f || widthRatio > 1.1f) return null
-
-        val merged = ImageUtil.mergeVertically(imageSource, nextSource)
-        viewer.onStripMerged(nextPage)
-        return merged
     }
 
     private fun rotateDualPage(imageSource: BufferedSource): BufferedSource {

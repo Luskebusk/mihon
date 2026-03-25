@@ -10,6 +10,8 @@ import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.viewer.calculateChapterGap
 import eu.kanade.tachiyomi.util.system.createReaderThemeContext
 import eu.kanade.tachiyomi.widget.ViewPagerAdapter
+import okio.Buffer
+import tachiyomi.core.common.util.system.ImageUtil
 import tachiyomi.core.common.util.system.logcat
 
 /**
@@ -52,7 +54,16 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
         val nextHasMissingChapters = calculateChapterGap(chapters.nextChapter, chapters.currChapter) > 0
 
         // Add previous chapter pages and transition
-        chapters.prevChapter?.pages?.let(newItems::addAll)
+        chapters.prevChapter?.pages?.let { prevPages ->
+            if (viewer.config.mergeSplitPages) {
+                val mutablePrev = prevPages.toMutableList()
+                val consumed = preprocessMergePairs(mutablePrev)
+                mutablePrev.removeAll(consumed)
+                newItems.addAll(mutablePrev)
+            } else {
+                newItems.addAll(prevPages)
+            }
+        }
 
         // Skip transition page if the chapter is loaded & current page is not a transition page
         if (prevHasMissingChapters || forceTransition || chapters.prevChapter?.state !is ReaderChapter.State.Loaded) {
@@ -77,6 +88,11 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
                     preprocessed[key]?.let { pages.add(key + 1, it) }
                 }
 
+            if (viewer.config.mergeSplitPages) {
+                val consumed = preprocessMergePairs(pages)
+                pages.removeAll(consumed)
+            }
+
             newItems.addAll(pages)
         }
 
@@ -94,7 +110,16 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
                 }
             }
 
-        chapters.nextChapter?.pages?.let(newItems::addAll)
+        chapters.nextChapter?.pages?.let { nextPages ->
+            if (viewer.config.mergeSplitPages) {
+                val mutableNext = nextPages.toMutableList()
+                val consumed = preprocessMergePairs(mutableNext)
+                mutableNext.removeAll(consumed)
+                newItems.addAll(mutableNext)
+            } else {
+                newItems.addAll(nextPages)
+            }
+        }
 
         // Resets double-page splits, else insert pages get misplaced
         items.filterIsInstance<InsertPage>().also { items.removeAll(it) }
@@ -185,11 +210,83 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
         notifyDataSetChanged()
     }
 
-    fun onStripMerged(stripPage: ReaderPage) {
-        val index = items.indexOf(stripPage)
-        if (index != -1) {
-            items.removeAt(index)
-            notifyDataSetChanged()
+    /**
+     * Scans [pages] for consecutive pairs that should be merged vertically (per the "Merge split
+     * pages" setting).  For each qualifying pair, sets [ReaderPage.mergePartner] on the first page
+     * and returns the second pages (the "consumed" ones) so the caller can remove them from the
+     * adapter item list before the ViewPager ever sees them.
+     *
+     * Only pages whose streams are already available are considered, so this is safe to call at
+     * chapter-load time even for chapters that are still being downloaded (unloaded pages are
+     * simply left alone and will not be merged).
+     */
+    private fun preprocessMergePairs(pages: MutableList<ReaderPage>): Set<ReaderPage> {
+        val consumed = mutableSetOf<ReaderPage>()
+        var i = 0
+        while (i < pages.size) {
+            val page = pages[i]
+            if (page is InsertPage || page in consumed) {
+                i++
+                continue
+            }
+            if (tryPreprocessMergePair(page, pages, i, consumed)) {
+                i += 2
+            } else {
+                i++
+            }
+        }
+        return consumed
+    }
+
+    /**
+     * Attempts to identify [page] (at [index] in [pages]) as the first of a merge pair.
+     * If successful, sets [page.mergePartner][ReaderPage.mergePartner] and adds the second page to
+     * [consumed], then returns true.  Returns false if the pair does not qualify.
+     */
+    private fun tryPreprocessMergePair(
+        page: ReaderPage,
+        pages: List<ReaderPage>,
+        index: Int,
+        consumed: MutableSet<ReaderPage>,
+    ): Boolean {
+        val nextPage = pages.getOrNull(index + 1) ?: return false
+        if (nextPage is InsertPage || nextPage in consumed) return false
+
+        val stream = page.stream ?: return false
+        val nextStream = nextPage.stream ?: return false
+
+        return try {
+            val source = stream().use { Buffer().readFrom(it) }
+            val (width, height) = ImageUtil.getImageDimensions(source) ?: return false
+            val aspectRatio = width.toFloat() / height
+
+            val minNextAspectRatio = when {
+                aspectRatio < 1.0f -> 1.5f  // PATH 1: portrait → next must be a wide strip
+                aspectRatio > 1.0f -> 1.0f  // PATH 2: landscape → next must also be landscape
+                else -> return false         // Exactly square — skip
+            }
+
+            val nextSource = nextStream().use { Buffer().readFrom(it) }
+            val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return false
+
+            // Next page must meet the minimum aspect ratio threshold.
+            // Fall back to content-bounds check to handle pages with large black padding.
+            val nextIsWide = nextWidth.toFloat() / nextHeight > minNextAspectRatio
+            if (!nextIsWide) {
+                val contentBounds = ImageUtil.getContentBounds(nextSource)
+                val effectiveHeight = contentBounds?.height() ?: 0
+                if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= minNextAspectRatio) return false
+            }
+
+            // Widths must be approximately equal (within 10%).
+            val widthRatio = width.toFloat() / nextWidth
+            if (widthRatio < 0.9f || widthRatio > 1.1f) return false
+
+            page.mergePartner = nextPage
+            consumed.add(nextPage)
+            true
+        } catch (e: Exception) {
+            false
         }
     }
 
