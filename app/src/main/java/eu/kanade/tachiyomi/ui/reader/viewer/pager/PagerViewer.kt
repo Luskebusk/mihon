@@ -449,6 +449,15 @@ abstract class PagerViewer(val activity: ReaderActivity) : Viewer {
         }
     }
 
+    /**
+     * Removes [stripPage] from the adapter after a runtime merge (online chapters).
+     * Already called from the UI thread (inside withUIContext in PagerPageHolder.setImage),
+     * so the adapter is updated directly without an extra runOnUiThread dispatch.
+     */
+    fun onStripMerged(stripPage: ReaderPage) {
+        adapter.onStripMerged(stripPage)
+    }
+
     private fun cleanupPageSplit() {
         adapter.cleanupPageSplit()
     }
