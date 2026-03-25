@@ -211,6 +211,19 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
     }
 
     /**
+     * Removes [stripPage] from the adapter after a runtime merge (online chapters).
+     * Called from the UI thread by [PagerViewer.onStripMerged] *after* the merging page's image
+     * has been displayed, so [notifyDataSetChanged] no longer causes a flash on the current page.
+     */
+    fun onStripMerged(stripPage: ReaderPage) {
+        val index = items.indexOf(stripPage)
+        if (index != -1) {
+            items.removeAt(index)
+            notifyDataSetChanged()
+        }
+    }
+
+    /**
      * Scans [pages] for consecutive pairs that should be merged vertically (per the "Merge split
      * pages" setting).  For each qualifying pair, sets [ReaderPage.mergePartner] on the first page
      * and returns the second pages (the "consumed" ones) so the caller can remove them from the
