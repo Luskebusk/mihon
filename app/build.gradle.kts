@@ -1,3 +1,5 @@
+import java.util.Properties
+
 import mihon.gradle.Config
 import mihon.gradle.getBuildTime
 import mihon.gradle.getLatestCommitCount
@@ -20,19 +22,22 @@ if (Config.includeTelemetry) {
     }
 }
 
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) load(f.inputStream())
+}
+fun signingProp(envKey: String, propKey: String) =
+    System.getenv(envKey) ?: localProps[propKey] as String?
+
 android {
     namespace = "eu.kanade.tachiyomi"
 
-    val localProps = java.util.Properties().apply {
-        val f = rootProject.file("local.properties")
-        if (f.exists()) load(f.inputStream())
-    }
     signingConfigs {
         create("release") {
-            keyAlias = localProps["signing.keyAlias"] as String?
-            keyPassword = localProps["signing.keyPassword"] as String?
-            storeFile = localProps["signing.keyStore"]?.let { file(it as String) }
-            storePassword = localProps["signing.keyStorePassword"] as String?
+            keyAlias = signingProp("SIGNING_KEY_ALIAS", "signing.keyAlias")
+            keyPassword = signingProp("SIGNING_KEY_PASSWORD", "signing.keyPassword")
+            storeFile = signingProp("SIGNING_STORE_FILE", "signing.keyStore")?.let { file(it) }
+            storePassword = signingProp("SIGNING_STORE_PASSWORD", "signing.keyStorePassword")
         }
     }
 
