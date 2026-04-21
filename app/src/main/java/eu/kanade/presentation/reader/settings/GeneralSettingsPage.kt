@@ -96,7 +96,7 @@ internal fun ColumnScope.GeneralPage(screenModel: ReaderSettingsScreenModel) {
 
     CheckboxItem(
         label = stringResource(MR.strings.pref_merge_split_pages),
-        pref = screenModel.preferences.mergeSplitPages(),
+        pref = screenModel.preferences.mergeSplitPages,
     )
 
     CheckboxItem(

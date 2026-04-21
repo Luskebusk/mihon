@@ -107,7 +107,7 @@ class PagerConfig(
                 { imagePropertyChangedListener?.invoke() },
             )
 
-        readerPreferences.mergeSplitPages()
+        readerPreferences.mergeSplitPages
             .register(
                 { mergeSplitPages = it },
                 { imagePropertyChangedListener?.invoke() },
