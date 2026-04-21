@@ -23,6 +23,19 @@ if (Config.includeTelemetry) {
 android {
     namespace = "eu.kanade.tachiyomi"
 
+    val localProps = java.util.Properties().apply {
+        val f = rootProject.file("local.properties")
+        if (f.exists()) load(f.inputStream())
+    }
+    signingConfigs {
+        create("release") {
+            keyAlias = localProps["signing.keyAlias"] as String?
+            keyPassword = localProps["signing.keyPassword"] as String?
+            storeFile = localProps["signing.keyStore"]?.let { file(it as String) }
+            storePassword = localProps["signing.keyStorePassword"] as String?
+        }
+    }
+
     defaultConfig {
         applicationId = "app.mihon"
 
@@ -49,6 +62,8 @@ android {
             isShrinkResources = Config.enableCodeShrink
 
             proguardFiles("proguard-android-optimize.txt", "proguard-rules.pro")
+
+            signingConfig = signingConfigs.findByName("release")
 
             buildConfigField("String", "BUILD_TIME", "\"${getBuildTime(useLatestCommitTime = true)}\"")
         }
