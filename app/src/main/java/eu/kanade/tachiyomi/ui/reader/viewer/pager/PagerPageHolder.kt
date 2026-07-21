@@ -16,6 +16,7 @@ import eu.kanade.tachiyomi.widget.ViewPagerAdapter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import logcat.LogPriority
@@ -74,6 +75,8 @@ class PagerPageHolder(
         super.onDetachedFromWindow()
         loadJob?.cancel()
         loadJob = null
+        mergeJob?.cancel()
+        mergeJob = null
     }
 
     private fun initProgressIndicator() {
@@ -151,11 +154,26 @@ class PagerPageHolder(
     private var pageConsumedByMerge: ReaderPage? = null
 
     /**
+     * Potential merge partner whose image hadn't been downloaded yet when this page was rendered
+     * (online chapters). Set by [detectAndMergeAtRuntime], consumed by [setImage] which launches
+     * [mergeWhenPartnerReady] to load the partner in the background and re-render merged once
+     * it's available — without any user interaction.
+     */
+    @Volatile
+    private var pendingMergePartner: ReaderPage? = null
+
+    /**
+     * Job that waits for a pending merge partner to finish downloading (see [mergeWhenPartnerReady]).
+     */
+    private var mergeJob: Job? = null
+
+    /**
      * Called when the page is ready.
      */
     private suspend fun setImage() {
         progressIndicator?.setProgress(0)
         pageConsumedByMerge = null
+        pendingMergePartner = null
 
         val streamFn = page.stream ?: return
 
@@ -192,6 +210,13 @@ class PagerPageHolder(
                 pageConsumedByMerge?.let {
                     viewer.onStripMerged(it)
                     pageConsumedByMerge = null
+                }
+                // Partner page wasn't downloaded yet — load it in the background and
+                // re-render merged as soon as it's available.
+                pendingMergePartner?.let {
+                    pendingMergePartner = null
+                    mergeJob?.cancel()
+                    mergeJob = scope.launch { mergeWhenPartnerReady(it) }
                 }
             }
         } catch (e: Throwable) {
@@ -235,21 +260,21 @@ class PagerPageHolder(
     /**
      * Merges this page with its merge partner.
      *
-     * If [ReaderPage.mergePartner] was pre-identified during chapter loading (downloaded chapters),
-     * uses that directly.  Otherwise falls back to runtime dimension-based detection for online
-     * chapters whose streams were not available at chapter-load time; in that case the consumed
-     * partner page is stored in [pageConsumedByMerge] and removed from the adapter *after*
-     * [setImage] completes so the current page is already on-screen before any adapter mutation.
+     * If [ReaderPage.mergePartner] was pre-identified (during chapter loading for downloaded
+     * chapters, or by a previous runtime detection), uses it directly.  Otherwise falls back to
+     * runtime detection for online chapters whose streams were not available at chapter-load time.
      *
      * Returns null if the page should not be merged (caller falls through to normal rendering).
      */
     private fun mergeWithPartner(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
-        // Fast path: merge partner was pre-identified at chapter-load time.
-        if (page.mergePartner != null) {
-            val partner = page.mergePartner!!
+        // Fast path: merge partner already identified.
+        page.mergePartner?.let { partner ->
             val partnerStream = partner.stream ?: return null
             return try {
                 val partnerSource = partnerStream().use { Buffer().readFrom(it) }
+                // Remove the partner from the adapter after display in case it is still present
+                // (runtime merges); no-op when it was already removed at preprocessing time.
+                pageConsumedByMerge = partner
                 ImageUtil.mergeVertically(imageSource, partnerSource)
             } catch (e: Exception) {
                 logcat(LogPriority.ERROR, e) { "Failed to merge with pre-assigned partner page" }
@@ -257,57 +282,79 @@ class PagerPageHolder(
             }
         }
 
+        // Known non-merge page — skip detection entirely.
+        if (page.mergeChecked) return null
+
         // Slow path: runtime detection for online chapters.
         return detectAndMergeAtRuntime(page, imageSource)
     }
 
     /**
      * Runtime merge detection for online chapters where streams weren't available during
-     * preprocessing in [PagerViewerAdapter].  Mirrors the dimension checks used by
-     * [PagerViewerAdapter.tryPreprocessMergePair] but runs at render time.
+     * preprocessing in [PagerViewerAdapter].
      *
      * On success, sets [ReaderPage.mergePartner] on this page and stores the consumed partner
      * in [pageConsumedByMerge]; [setImage] will call [PagerViewer.onStripMerged] after the
      * current page's image is displayed to avoid adapter-mutation-induced flashing.
+     *
+     * If the potential partner hasn't been downloaded yet, stores it in [pendingMergePartner]
+     * so [setImage] can load it in the background and re-render merged when it's ready.
      */
     private fun detectAndMergeAtRuntime(page: ReaderPage, imageSource: BufferedSource): BufferedSource? {
-        val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
-        val aspectRatio = width.toFloat() / height
-
-        val minNextAspectRatio = when {
-            aspectRatio < 1.0f -> 1.5f  // PATH 1: portrait → next must be a wide strip
-            aspectRatio > 1.0f -> 1.0f  // PATH 2: landscape → next must also be landscape
-            else -> return null          // Exactly square — skip
-        }
-
         val pages = page.chapter.pages ?: return null
         val pageIndex = pages.indexOf(page)
         if (pageIndex < 0) return null
-        val nextPage = pages.getOrNull(pageIndex + 1) ?: return null
-
-        val nextStream = nextPage.stream ?: return null
-        val nextSource = nextStream().use { Buffer().readFrom(it) }
-
-        val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return null
-
-        // Next page must meet the minimum aspect ratio threshold.
-        // Fall back to content-bounds check to handle pages with large black padding.
-        val nextIsWide = nextWidth.toFloat() / nextHeight > minNextAspectRatio
-        if (!nextIsWide) {
-            val contentBounds = ImageUtil.getContentBounds(nextSource)
-            val effectiveHeight = contentBounds?.height() ?: 0
-            if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= minNextAspectRatio) return null
+        val nextPage = pages.getOrNull(pageIndex + 1)
+        if (nextPage == null) {
+            page.mergeChecked = true
+            return null
         }
 
-        // Widths must be approximately equal (within 10%).
-        val widthRatio = width.toFloat() / nextWidth
-        if (widthRatio < 0.9f || widthRatio > 1.1f) return null
+        val nextStream = nextPage.stream
+        if (nextStream == null) {
+            // Partner not downloaded yet — quickly check if this page could be a merge top-half
+            // (non-square); if so, defer the merge until the partner is available.
+            val (width, height) = ImageUtil.getImageDimensions(imageSource) ?: return null
+            if (width == height) {
+                page.mergeChecked = true
+            } else {
+                pendingMergePartner = nextPage
+            }
+            return null
+        }
 
-        page.mergePartner = nextPage
-        // Signal to setImage() that nextPage should be removed from the adapter once the
-        // current page's image is already on-screen (prevents notifyDataSetChanged() flash).
-        pageConsumedByMerge = nextPage
-        return ImageUtil.mergeVertically(imageSource, nextSource)
+        return try {
+            val nextSource = nextStream().use { Buffer().readFrom(it) }
+            val qualifies = ImageUtil.shouldMergeSplitPages(imageSource, nextSource)
+            page.mergeChecked = true
+            if (!qualifies) return null
+            page.mergePartner = nextPage
+            pageConsumedByMerge = nextPage
+            ImageUtil.mergeVertically(imageSource, nextSource)
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Failed runtime merge detection" }
+            null
+        }
+    }
+
+    /**
+     * Requests [partner] to be loaded (it is usually already queued by the preloader), waits for
+     * it to become ready, then re-runs [setImage] — which now finds the partner's stream available
+     * and renders the merged image. The partner page is removed from the adapter afterwards.
+     */
+    private suspend fun mergeWhenPartnerReady(partner: ReaderPage) {
+        val loader = page.chapter.pageLoader ?: return
+        supervisorScope {
+            val partnerLoadJob = launchIO { loader.loadPage(partner) }
+            val state = partner.statusFlow.first { it == Page.State.Ready || it is Page.State.Error }
+            partnerLoadJob.cancel()
+            if (state != Page.State.Ready || partner.stream == null) {
+                // Partner failed to load — don't retry forever; the page stays unmerged.
+                page.mergeChecked = true
+                return@supervisorScope
+            }
+            setImage()
+        }
     }
 
     private fun rotateDualPage(imageSource: BufferedSource): BufferedSource {

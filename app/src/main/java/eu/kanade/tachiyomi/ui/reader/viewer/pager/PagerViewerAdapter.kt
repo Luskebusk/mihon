@@ -10,7 +10,8 @@ import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.viewer.calculateChapterGap
 import eu.kanade.tachiyomi.util.system.createReaderThemeContext
 import eu.kanade.tachiyomi.widget.ViewPagerAdapter
-import okio.Buffer
+import okio.buffer
+import okio.source
 import tachiyomi.core.common.util.system.ImageUtil
 import tachiyomi.core.common.util.system.logcat
 
@@ -242,6 +243,21 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
                 i++
                 continue
             }
+            // Reuse cached evaluation from a previous pass or a runtime merge.
+            val cachedPartner = page.mergePartner
+            if (cachedPartner != null) {
+                if (pages.getOrNull(i + 1) === cachedPartner) {
+                    consumed.add(cachedPartner)
+                    i += 2
+                } else {
+                    i++
+                }
+                continue
+            }
+            if (page.mergeChecked) {
+                i++
+                continue
+            }
             if (tryPreprocessMergePair(page, pages, i, consumed)) {
                 i += 2
             } else {
@@ -255,6 +271,9 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
      * Attempts to identify [page] (at [index] in [pages]) as the first of a merge pair.
      * If successful, sets [page.mergePartner][ReaderPage.mergePartner] and adds the second page to
      * [consumed], then returns true.  Returns false if the pair does not qualify.
+     *
+     * Streams are wrapped lazily so that only image headers are read from disk unless the
+     * content-bounds fallback inside [ImageUtil.shouldMergeSplitPages] requires more data.
      */
     private fun tryPreprocessMergePair(
         page: ReaderPage,
@@ -269,35 +288,17 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
         val nextStream = nextPage.stream ?: return false
 
         return try {
-            val source = stream().use { Buffer().readFrom(it) }
-            val (width, height) = ImageUtil.getImageDimensions(source) ?: return false
-            val aspectRatio = width.toFloat() / height
-
-            val minNextAspectRatio = when {
-                aspectRatio < 1.0f -> 1.5f  // PATH 1: portrait → next must be a wide strip
-                aspectRatio > 1.0f -> 1.0f  // PATH 2: landscape → next must also be landscape
-                else -> return false         // Exactly square — skip
+            val qualifies = stream().use { topIn ->
+                nextStream().use { bottomIn ->
+                    ImageUtil.shouldMergeSplitPages(topIn.source().buffer(), bottomIn.source().buffer())
+                }
             }
-
-            val nextSource = nextStream().use { Buffer().readFrom(it) }
-            val (nextWidth, nextHeight) = ImageUtil.getImageDimensions(nextSource) ?: return false
-
-            // Next page must meet the minimum aspect ratio threshold.
-            // Fall back to content-bounds check to handle pages with large black padding.
-            val nextIsWide = nextWidth.toFloat() / nextHeight > minNextAspectRatio
-            if (!nextIsWide) {
-                val contentBounds = ImageUtil.getContentBounds(nextSource)
-                val effectiveHeight = contentBounds?.height() ?: 0
-                if (effectiveHeight <= 0 || nextWidth.toFloat() / effectiveHeight <= minNextAspectRatio) return false
+            page.mergeChecked = true
+            if (qualifies) {
+                page.mergePartner = nextPage
+                consumed.add(nextPage)
             }
-
-            // Widths must be approximately equal (within 10%).
-            val widthRatio = width.toFloat() / nextWidth
-            if (widthRatio < 0.9f || widthRatio > 1.1f) return false
-
-            page.mergePartner = nextPage
-            consumed.add(nextPage)
-            true
+            qualifies
         } catch (e: Exception) {
             false
         }

@@ -262,6 +262,43 @@ object ImageUtil {
     }
 
     /**
+     * Determines whether two consecutive pages should be merged vertically (the "Merge split
+     * pages" feature). Two paths qualify:
+     *  - PATH 1: a portrait page followed by a wide sliver strip (aspect ratio > 1.5)
+     *  - PATH 2: a landscape strip followed by another landscape strip (aspect ratio > 1.0)
+     * Falls back to a content-bounds check for bottom pages with large black padding, and
+     * requires both pages to have approximately equal widths (within 10%).
+     *
+     * Only reads image headers unless the content-bounds fallback is needed, so it is cheap
+     * to call even with streaming sources.
+     */
+    fun shouldMergeSplitPages(topSource: BufferedSource, bottomSource: BufferedSource): Boolean {
+        val (width, height) = getImageDimensions(topSource) ?: return false
+        val aspectRatio = width.toFloat() / height
+
+        val minBottomAspectRatio = when {
+            aspectRatio < 1.0f -> 1.5f // PATH 1: portrait → next must be a wide strip
+            aspectRatio > 1.0f -> 1.0f // PATH 2: landscape → next must also be landscape
+            else -> return false // Exactly square — skip
+        }
+
+        val (bottomWidth, bottomHeight) = getImageDimensions(bottomSource) ?: return false
+
+        // Bottom page must meet the minimum aspect ratio threshold.
+        // Fall back to content-bounds check to handle pages with large black padding.
+        if (bottomWidth.toFloat() / bottomHeight <= minBottomAspectRatio) {
+            val effectiveHeight = getContentBounds(bottomSource)?.height() ?: 0
+            if (effectiveHeight <= 0 || bottomWidth.toFloat() / effectiveHeight <= minBottomAspectRatio) {
+                return false
+            }
+        }
+
+        // Widths must be approximately equal (within 10%).
+        val widthRatio = width.toFloat() / bottomWidth
+        return widthRatio in 0.9f..1.1f
+    }
+
+    /**
      * Merge two images vertically (top image above, bottom image below).
      * Used to stitch split manga pages back together.
      */
@@ -282,7 +319,7 @@ object ImageUtil {
         bottomBitmap.recycle()
 
         val output = Buffer()
-        result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        result.compress(Bitmap.CompressFormat.JPEG, 90, output.outputStream())
         result.recycle()
 
         return output

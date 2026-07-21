@@ -12,6 +12,12 @@ open class ReaderPage(
 
     open lateinit var chapter: ReaderChapter
 
-    /** The next page to merge with when "Merge split pages" is enabled. Set during chapter loading. */
+    /** The next page to merge with when "Merge split pages" is enabled. */
     var mergePartner: ReaderPage? = null
+
+    /**
+     * Whether merge-pair evaluation has completed for this page (with both image streams
+     * available). Prevents repeated image decoding across adapter reloads and render passes.
+     */
+    var mergeChecked: Boolean = false
 }
